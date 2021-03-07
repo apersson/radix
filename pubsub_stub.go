@@ -58,6 +58,12 @@ type pubSubStub struct {
 // return from the Addr method.
 //
 func NewPubSubStubConn(remoteNetwork, remoteAddr string, fn func(context.Context, []string) interface{}) (Conn, chan<- PubSubMessage) {
+	if fn == nil {
+		fn = func(_ context.Context, args []string) interface{} {
+			return fmt.Errorf("command %#v not supported by stub", args)
+		}
+	}
+
 	ch := make(chan PubSubMessage)
 	s := &pubSubStub{
 		proc:    proc.New(),
