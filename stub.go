@@ -6,6 +6,7 @@ import (
 	"container/list"
 	"context"
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/mediocregopher/radix/v4/internal/proc"
@@ -84,6 +85,7 @@ func (s *stub) responder(ctx context.Context) {
 			return
 		case cu := <-s.ch:
 			for _, cmd := range cu.cmds {
+				log.Printf("calling cmd %v", cmd)
 				ret := s.fn(cu.ctx, cmd)
 				if err := asErr(ret); err != nil {
 					errList.PushBack(err)
@@ -92,6 +94,7 @@ func (s *stub) responder(ctx context.Context) {
 				}
 			}
 			if cu.unmarshaler != nil {
+				log.Printf("pushing unmarshaler %#v (%p)", cu.unmarshaler.unmarshalInto, cu.unmarshaler)
 				unmarshalerList.PushBack(cu.unmarshaler)
 			}
 			for {
@@ -109,6 +112,7 @@ func (s *stub) responder(ctx context.Context) {
 				}
 
 				err := resp3.Unmarshal(retBr, unmarshaler.unmarshalInto, opts)
+				log.Printf("unmarshaled %#v (%p) %v", unmarshaler.unmarshalInto, unmarshaler, err)
 				unmarshaler.errCh <- err
 			}
 		}
@@ -150,9 +154,11 @@ func (s *stub) EncodeDecode(ctx context.Context, m, u interface{}) error {
 
 	closedCh := s.proc.ClosedCh()
 
+	log.Printf("EncodeDecode writing %+v to channel", cu)
 	select {
 	case s.ch <- cu:
 	case <-ctx.Done():
+		log.Printf("write for %+v canceled: %v", cu, ctx.Err())
 		return ctx.Err()
 	case <-closedCh:
 		return proc.ErrClosed
@@ -168,10 +174,12 @@ func (s *stub) EncodeDecode(ctx context.Context, m, u interface{}) error {
 		return nil
 	}
 
+	log.Printf("EncodeDecode reading for %+v from channel", cu)
 	select {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
+		log.Printf("read for %+v canceled: %v", cu, ctx.Err())
 		return ctx.Err()
 	case <-closedCh:
 		return proc.ErrClosed
