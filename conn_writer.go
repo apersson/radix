@@ -77,42 +77,41 @@ func (cw *connWriter) forwardToReader(mu connMarshalerUnmarshaler) bool {
 	}
 }
 
-// write returns true if the write was successful.
-func (cw *connWriter) write(mu connMarshalerUnmarshaler) bool {
-	if err := mu.ctx.Err(); err != nil {
-		mu.errCh <- resp.ErrConnUsable{Err: fmt.Errorf("checking context before write: %w", err)}
-		return false
-
-	} else if err := resp3.Marshal(cw.bw, mu.marshal, cw.opts); err != nil {
-		mu.errCh <- fmt.Errorf("marshaling message to Conn: %w", err)
-		return false
-	}
-
-	return true
-}
-
 // flush returns false if doneCh is closed.
 func (cw *connWriter) flush() bool {
+	sendErr := func(mus []connMarshalerUnmarshaler, err error) {
+		for _, mu := range mus {
+			mu.errCh <- err
+		}
+	}
 	if len(cw.flushBuf) == 0 {
 		cw.pauseTicker()
 		return true
 	}
 
 	flushBuf := cw.flushBuf[:0]
-	for _, mu := range cw.flushBuf {
-		if cw.write(mu) {
-			flushBuf = append(flushBuf, mu)
+	for i, mu := range cw.flushBuf {
+		if err := mu.ctx.Err(); err != nil {
+			mu.errCh <- resp.ErrConnUsable{Err: fmt.Errorf("checking context before write: %w", err)}
+			continue
 		}
 
+		// A failure at this point is unrecoverable because the send
+		// buffer can be in an inconsistent state.
+		if err := resp3.Marshal(cw.bw, mu.marshal, cw.opts); err != nil {
+			err := fmt.Errorf("marshaling message to Conn: %w", err)
+			sendErr(flushBuf, err)
+			sendErr(cw.flushBuf[i:], err)
+			return false
+		}
+
+		flushBuf = append(flushBuf, mu)
 	}
 	cw.flushBuf = cw.flushBuf[:0]
 
 	if err := cw.bw.Flush(); err != nil {
-		err = fmt.Errorf("flushing write buffer: %w", err)
-		for _, mu := range flushBuf {
-			mu.errCh <- err
-		}
-
+		sendErr(flushBuf, fmt.Errorf("flushing write buffer: %w", err))
+		return false
 	} else {
 		for _, mu := range flushBuf {
 			// if there's no unmarshaler then don't forward to the reader

@@ -61,12 +61,15 @@ func TestConnWriter(t *testing.T) {
 		unmarshal    bool
 		expUnmarshal bool
 		expErr       bool
+		expTimeout   bool
 	}
 
 	type step struct {
 		mu              *mu
 		tick            bool
 		bwErr, bwNilErr bool
+		noEventLoop     bool
+		noWrite         bool
 	}
 
 	type test struct {
@@ -88,14 +91,14 @@ func TestConnWriter(t *testing.T) {
 			descr: "single marshal error",
 			steps: []step{
 				{bwErr: true},
-				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}},
+				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}, noEventLoop: true},
 			},
 		},
 		{
 			descr: "single flush error",
 			steps: []step{
 				{bwNilErr: true}, {bwErr: true},
-				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}},
+				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}, noEventLoop: true},
 			},
 		},
 		{
@@ -111,7 +114,7 @@ func TestConnWriter(t *testing.T) {
 			flushInterval: true,
 			steps: []step{
 				{bwErr: true},
-				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}},
+				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}, noEventLoop: true},
 			},
 		},
 		{
@@ -119,7 +122,7 @@ func TestConnWriter(t *testing.T) {
 			flushInterval: true,
 			steps: []step{
 				{bwNilErr: true}, {bwErr: true},
-				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}},
+				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}, noEventLoop: true},
 			},
 		},
 		{
@@ -132,25 +135,26 @@ func TestConnWriter(t *testing.T) {
 			expBufContents: "abc",
 		},
 		{
-			descr: "multi marshal error",
+			descr:         "multi marshal error",
+			flushInterval: true,
 			steps: []step{
 				{bwErr: true},
-				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}},
-				{mu: &mu{marshal: "b", unmarshal: true, expUnmarshal: true}},
-				{mu: &mu{marshal: "c", unmarshal: true, expUnmarshal: true}},
+				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}, noEventLoop: true},
+				{mu: &mu{marshal: "b", unmarshal: true, expTimeout: true}, noEventLoop: true, noWrite: true},
+				{mu: &mu{marshal: "c", unmarshal: true, expTimeout: true}, noEventLoop: true, noWrite: true},
 			},
-			expBufContents: "bc",
+			expBufContents: "",
 		},
 		{
 			descr: "multi flush error",
 			steps: []step{
 				{bwNilErr: true},
 				{bwErr: true},
-				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}},
-				{mu: &mu{marshal: "b", unmarshal: true, expUnmarshal: true}},
-				{mu: &mu{marshal: "c", unmarshal: true, expUnmarshal: true}},
+				{mu: &mu{marshal: "a", unmarshal: true, expErr: true}, noEventLoop: true},
+				{mu: &mu{marshal: "b", unmarshal: true, expTimeout: true}, noWrite: true, noEventLoop: true},
+				{mu: &mu{marshal: "c", unmarshal: true, expTimeout: true}, noWrite: true, noEventLoop: true},
 			},
-			expBufContents: "abc",
+			expBufContents: "",
 		},
 		{
 			descr:         "multi",
@@ -164,17 +168,17 @@ func TestConnWriter(t *testing.T) {
 			expBufContents: "abc",
 		},
 		{
-			descr:         "multi marshal error",
+			descr:         "multi marshal error 2",
 			flushInterval: true,
 			steps: []step{
 				{bwNilErr: true}, {bwNilErr: true}, // allow the first marshaler
 				{mu: &mu{marshal: "a", unmarshal: true, expUnmarshal: true}},
 				{bwErr: true},
 				{mu: &mu{marshal: "b", unmarshal: true, expErr: true}},
-				{mu: &mu{marshal: "c", unmarshal: true, expUnmarshal: true}},
-				{tick: true},
+				{mu: &mu{marshal: "c", unmarshal: true, expErr: true}},
+				{tick: true, noEventLoop: true},
 			},
-			expBufContents: "ac",
+			expBufContents: "a",
 		},
 		{
 			descr:         "multi flush error",
@@ -186,7 +190,7 @@ func TestConnWriter(t *testing.T) {
 				{mu: &mu{marshal: "b", unmarshal: true, expErr: true}},
 				{mu: &mu{marshal: "c", unmarshal: true, expErr: true}},
 				{bwErr: true}, // deny the flush
-				{tick: true},
+				{tick: true, noEventLoop: true},
 			},
 			expBufContents: "a",
 		},
@@ -330,7 +334,16 @@ func TestConnWriter(t *testing.T) {
 					if step.mu.unmarshal {
 						mu.unmarshalInto = new(resp3.RawMessage)
 					}
-					wCh <- mu
+					select {
+					case wCh <- mu:
+						if step.noWrite {
+							t.Errorf("write to wCh succeeded, but it should time out")
+						}
+					case <-time.After(100 * time.Millisecond):
+						if !step.noWrite {
+							t.Errorf("timed out writing to wCh")
+						}
+					}
 					expMUs = append(expMUs, muTup{
 						mu:                       *step.mu,
 						connMarshalerUnmarshaler: mu,
@@ -350,6 +363,15 @@ func TestConnWriter(t *testing.T) {
 
 				default:
 					panic(fmt.Sprintf("bad step %#v", step))
+				}
+
+				if step.noEventLoop {
+					select {
+					case cw.eventLoopCh <- struct{}{}:
+						t.Errorf("event loop responded to step %d (%+v)", i, step)
+					case <-time.After(100 * time.Millisecond):
+						continue
+					}
 				}
 
 				select {
@@ -382,6 +404,12 @@ func TestConnWriter(t *testing.T) {
 					case <-expMU.connMarshalerUnmarshaler.errCh:
 					default:
 						t.Errorf("errCh for %+v never got written", expMU.mu)
+					}
+				} else if expMU.mu.expTimeout {
+					select {
+					case <-expMU.connMarshalerUnmarshaler.errCh:
+						t.Errorf("expected timeout for %+v, but errCh is not empty", expMU.mu)
+					default:
 					}
 				}
 			}
