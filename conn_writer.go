@@ -112,14 +112,14 @@ func (cw *connWriter) flush() bool {
 	if err := cw.bw.Flush(); err != nil {
 		sendErr(flushBuf, fmt.Errorf("flushing write buffer: %w", err))
 		return false
-	} else {
-		for _, mu := range flushBuf {
-			// if there's no unmarshaler then don't forward to the reader
-			if mu.unmarshalInto == nil {
-				mu.errCh <- nil
-			} else if !cw.forwardToReader(mu) {
-				return false
-			}
+	}
+
+	for _, mu := range flushBuf {
+		// if there's no unmarshaler then don't forward to the reader
+		if mu.unmarshalInto == nil {
+			mu.errCh <- nil
+		} else if !cw.forwardToReader(mu) {
+			return false
 		}
 	}
 
